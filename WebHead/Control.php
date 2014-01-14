@@ -26,7 +26,7 @@ class Control extends Nette\Application\UI\Control
 	/**
 	* doctypes
 	*/
-	const HTML_4 = self::HTML_4_STRICT; //backwards compatibility
+	const HTML_4 = self::HTML_4_STRICT; // backwards compatibility
 	const HTML_4_STRICT = 'html4_strict';
 	const HTML_4_TRANSITIONAL = 'html4_transitional';
 	const HTML_4_FRAMESET = 'html4_frameset';
@@ -85,6 +85,12 @@ class Control extends Nette\Application\UI\Control
 	/** @var array header meta tags */
 	private $metaTags = array();
 
+	/** @var array header meta OG tags */
+	private $ogTags = array();
+
+	/** @var array header rss */
+	private $rss = array();
+
 	/** @var string document content type */
 	private $contentType;
 
@@ -97,8 +103,11 @@ class Control extends Nette\Application\UI\Control
 	/** @var bool was headers sent? */
 	private $headersSent = FALSE;
 	
-	/** @var array */
-	private $headElements = array();
+	/** @var AssetsCollector */
+	private $assetsCollector;
+
+	/** @var IRenderer */
+	private $renderer;
 
 	/** @var FiltersCompiler */
 	private $filtersCompiler;
@@ -116,6 +125,7 @@ class Control extends Nette\Application\UI\Control
 	{
 		parent::__construct($parent, self::PRESENTER_COMPONENT_NAME);
 		$this->httpResponse = $httpResponse;
+		$this->assetsCollector = new AssetsCollector($this);
 		// sets defaults
 		$this->setDocType(self::HTML_5);
 		$this->setLanguage(self::CZECH);
@@ -135,24 +145,32 @@ class Control extends Nette\Application\UI\Control
 				$this->$m($v);
 			}
 		}
-		if(isset($config['compiler'])){
+		foreach($config['css'] as $k => $v){
+			if(is_numeric($k)){ // indexed array
+				$this->addCss($v);
+			}else{ // assoc array - k = file, v = params
+				$this->addCss($k, $v);
+			}
+		}
+		foreach($config['js'] as $js){
+			$this->addJs($js);
+		}
+		if(isset($config['compiler']) && !empty($config['compiler'])){
+			$compiler = $this->getFiltersCompiler();
 			if(!isset($config['compiler']['outputDir'])){
 				throw new Nette\InvalidStateException("Output dir is not defined.");
 			}elseif(!isset($config['compiler']['wwwPath'])){
 				throw new Nette\InvalidStateException("Www path is not defined.");
 			}
-			$this->getFiltersCompiler()->setOutputDir($config['compiler']['outputDir'], $config['compiler']['wwwPath']);
+			$compiler->setOutputDir($config['compiler']['outputDir'], $config['compiler']['wwwPath']);
 			if(isset($config['compiler']['filters'])){
 				foreach((array) $config['compiler']['filters'] as $filter){
 					$filter = is_string($filter) ? new $filter : $filter;
-					$this->getFiltersCompiler()->registerFilter($filter);
+					$compiler->registerFilter($filter);
 				}
 			}
-			foreach($config['css'] as $css){
-				$this->addCss($css);
-			}
-			foreach($config['js'] as $js){
-				$this->addJs($js);
+			if(isset($config['compiler']['joinFiles'])){
+				$compiler->setJoinFiles($config['compiler']['joinFiles']);
 			}
 		}
 	}
@@ -381,38 +399,40 @@ class Control extends Nette\Application\UI\Control
 	/********************************* Head Elements ************************************/
 
 	/**
-	 * @param $css
 	 */
 	public function addCss($css, array $params = NULL)
 	{
-		$this->headElements[$css] = array(
-			'type' => 'css',
-			'file' => $css,
-			'priority' => isset($params['priority']) ? (int) $params['priority'] : 0,
-		) + (array) $params;
+		$this->assetsCollector->addCss($css, $params);
 		return $this;
 	}
 
 
+	/**
+	 */
 	public function addJs($js, array $params = NULL)
 	{
-		$this->headElements[$js] = array(
-			'type' => 'js',
-			'file' => $js,
-			'priority' => isset($params['priority']) ? (int) $params['priority'] : 0,
-		) + (array) $params;
+		$this->assetsCollector->addJs($js, $params);
 		return $this;
 	}
 
 
-	public function addRss($rss, array $params = NULL)
+	/**
+	 */
+	public function addRss($rss)
 	{
-		$this->headElements[$rss] = array(
+		$this->rss[$rss] = array(
 			'type' => 'rss',
 			'file' => $rss,
-			'priority' => isset($params['priority']) ? (int) $params['priority'] : 0,
-		) + (array) $params;
+		);
 		return $this;
+	}
+
+
+	/**
+	 */
+	public function getRss()
+	{
+		return $this->rss;
 	}
 
 
@@ -467,7 +487,7 @@ class Control extends Nette\Application\UI\Control
 	}
 
 
-	/********** Specify Metatags **********/      
+	/********** Specific Metatags **********/
 
 	/**
 	* @param mixed $author
@@ -502,6 +522,22 @@ class Control extends Nette\Application\UI\Control
 	public function getDescription() 
 	{
 		return $this->getMetaTag('description');
+	}
+
+
+	/**
+	 */
+	public function addOgTag($name, $content)
+	{
+		$this->ogTags[$name] = $content;
+	}
+
+
+	/**
+	 */
+	public function getOgTags()
+	{
+		return $this->ogTags;
 	}
 
 
@@ -560,224 +596,92 @@ class Control extends Nette\Application\UI\Control
 	/********************************* Rendering ************************************/
 
 	/**
-	* @param mixed $docType
-	* @return mixed
-	*/
-	private function getDocTypeString($docType)
+	 */
+	public function setRenderer(IRenderer $renderer)
 	{
-		switch($docType){
-			case self::HTML_4_STRICT:
-				return '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">';
-			break;
-			case self::HTML_4_TRANSITIONAL:
-				return '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">';
-			break;
-			case self::HTML_4_FRAMESET:
-				return '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Frameset//EN" "http://www.w3.org/TR/html4/frameset.dtd">';
-			break;
-			case self::HTML_5:
-				return '<!DOCTYPE html>';
-			break;
-			case self::XHTML_1_STRICT:
-				return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">';
-			break;
-			case self::XHTML_1_TRANSITIONAL:
-				return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">';
-			break;
-			case self::XHTML_1_FRAMESET:
-				return '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Frameset//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-frameset.dtd">';
-			break;
-			default:
-				throw new Nette\InvalidStateException("Doctype $docType is not supported.");
-		}
+		$this->renderer = $renderer;
+		return $this;
 	}
 
 
 	/**
-	* Renders all
-	*/
+	 */
+	final public function getRenderer()
+	{
+		if ($this->renderer === NULL) {
+			$this->renderer = new Renderers\DefaultRenderer;
+		}
+		return $this->renderer;
+	}
+
+
+	/**
+	 */
 	public function render()
 	{
 		if(!$this->headersSent){
 			$this->sendHeaders();
 		}
-		$this->renderBegin();
-		$this->renderMetaTags();
-		$this->renderElements();
-		$this->renderEnd();
-	}
-	
-
-	/**
-	* Partially render: begin
-	*/
-	public function renderBegin()
-	{
-		if($this->isXml()){
-			echo self::XML_PROLOG . "\n";
-			echo '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="'.$this->language.'" lang="'.$this->language.'">' . "\n";   
-			echo $this->getDocTypeString($this->getDocType()) . "\n";
-		}else{
-			echo $this->getDocTypeString($this->getDocType()) . "\n";
-			echo '<html>' . "\n"; 
-		}
-		echo "<head>\n";
+		$args = func_get_args();
+		array_unshift($args, $this);
+		echo call_user_func_array(array($this->getRenderer(), 'render'), $args);
 	}
 
 
 	/**
 	 */
-	public function renderMetaTags()
+	public function __toString()
 	{
-		echo Nette\Utils\Html::el('meta')->addAttributes(array(
-			'http-equiv' => 'Content-Language',
-			'content' => $this->language,
-		)) . "\n";
-		echo Nette\Utils\Html::el('meta')->addAttributes(array(
-			'http-equiv' => 'Content-Type',
-			'content' => "$this->contentType; charset=utf-8",
-		)) . "\n";
-		echo Nette\Utils\Html::el('meta')->addAttributes(array(
-			'http-equiv' => 'Content-Style-Type',
-			'content' => 'text/css',
-		)) . "\n";
-		echo Nette\Utils\Html::el('meta')->addAttributes(array(
-			'http-equiv' => 'Content-Script-Type',
-			'content' => 'text/javascript',
-		)) . "\n";
-		echo "<title>{$this->getTitleString()}</title>" . "\n";
-		if ($this->favicon !== NULL) {
-			echo Nette\Utils\Html::el('link')->addAttributes(array(
-				'rel' => 'shortcut icon',
-				'href' => $this->favicon,
-			)) . "\n";
-		}
-		foreach ($this->metaTags as $name => $content) {
-			$this->renderElement('meta', array('name' => $name, 'content' => $content));
-			echo "\n";
-		}
-	}
-
-
-	/**
-	 */
-	public function renderElements()
-	{
-		$headElements = Utils::sortArrayByKey($this->headElements, 'priority');
-		foreach($headElements as $el){
-			$type = $el['type']; unset($el['type']);
-			$this->renderElement($type, $el);
-			echo "\n";
-		}
-	}
-              
-              
-	/**
-	* Partially render: end
-	* 
-	*/
-	public function renderEnd() 
-	{
-		echo "</head>";
-	}
-
-
-	/**
-	 * @param $type
-	 * @param $args
-	 * @internal
-	 */
-	public function renderElement($type, $args)
-	{
-		unset($args['priority']);
-		if(in_array($type, array("css", "js", "rss"))){
-			$file = $args['file']; unset($args['file']);
-			$result = $this->formatCompiledFilesLink($file);
-			if($result !== NULL){
-				$file = $result;
-			}
-			foreach((array) $this->linkFormatCallback as $callback){
-				if(is_callable($callback)){
-					$result = call_user_func($callback, $type, $file, $args);
-					if($result !== NULL){
-						$file = $result;
-					}
-				}
+		try {
+			return $this->getRenderer()->render($this);
+		} catch (\Exception $e) {
+			if (func_get_args() && func_get_arg(0)) {
+				throw $e;
+			} else {
+				trigger_error("Exception in " . __METHOD__ . "(): {$e->getMessage()} in {$e->getFile()}:{$e->getLine()}", E_USER_ERROR);
 			}
 		}
-		switch($type){
-			case "css":
-				echo Nette\Utils\Html::el('link')->addAttributes(array(
-					'rel' => 'stylesheet',
-					'type' => 'text/css',
-					'href' => $file,
-				) + (array) $args);
-			break;
-			case "js":
-				echo Nette\Utils\Html::el('script')->addAttributes(array(
-					'type' => 'text/javascript',
-					'src' => $file,
-				) + (array) $args);
-			break;
-			case "rss":
-				echo Nette\Utils\Html::el('link')->addAttributes(array(
-					'rel' => 'alternate',
-					'type' => 'application/rss+xml',
-					'href' => $file,
-					'title' => 'rss',
-				) + (array) $args);
-			break;
-			case "meta":
-				echo Nette\Utils\Html::el('meta')->addAttributes(array(
-					'name' => $args['name'],
-					'content' => $args['content'],
-				));
-			break;
-			default:
-				throw new Nette\InvalidStateException("Unknown el type '$type'.");
-		}
+	}
+
+
+
+	/********************************* Assets Collector ***********************************/
+
+	/**
+	 */
+	public function getAssetsCollector()
+	{
+		return $this->assetsCollector;
 	}
 
 
 
 	/********************************* Filters compiler ***********************************/
 
-	private function formatCompiledFilesLink($file)
+	public function setFiltersCompiler(FiltersCompiler $filtersCompiler)
 	{
-		if($this->filtersCompiler === NULL){
-			return NULL; // compiler not initilized
-		}elseif(!preg_match('#^\.?/?([^://].+)$#', $file, $match)){ // match relative path
-			return NULL;
-		}
-		$this->getFiltersCompiler()->compile();
-		$compiledFiles = $this->getFiltersCompiler()->getCompiledFiles();
-		if($compiledFiles === NULL){
-			return NULL;
-		}
-		$file = $match[1];
-		foreach($compiledFiles as $origFilePath => $compiledFile){
-			$origFilePath = str_replace('\\', '/', $origFilePath); // standardize directory separator
-			if(substr($origFilePath, strlen($origFilePath) - strlen($file)) === $file){ // relative path match od end of filesystem path
-				return $compiledFile;
-			}
-		}
-		return NULL;
-	}
-
-
-	private function createFiltersCompiler()
-	{
-		$compiler = new FiltersCompiler();
-		return $compiler;
+		$this->filtersCompiler = $filtersCompiler;
 	}
 
 
 	public function getFiltersCompiler()
 	{
 		if($this->filtersCompiler === NULL){
-			$this->filtersCompiler = $this->createFiltersCompiler();
+			$this->setFiltersCompiler($this->createFiltersCompiler());
 		}
 		return $this->filtersCompiler;
+	}
+
+
+	public function hasFiltersCompiler()
+	{
+		return (bool) $this->filtersCompiler !== NULL;
+	}
+
+
+	private function createFiltersCompiler()
+	{
+		return new FiltersCompiler();
 	}
 
 }

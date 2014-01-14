@@ -1,6 +1,5 @@
 <?php
 
-
 namespace WebHead;
 
 
@@ -10,17 +9,15 @@ use Nette\Utils\PhpGenerator;
 
 
 /*
-* @author Filip Prochazka, Adam Bisek
-* @license MIT
+* @author Adam Bisek
 */
 class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 {
 
-	/** @internal */
 	public $nodes = array();
 
-	/** @internal bool */
-	public $macroNodeOpened;
+	/** @internal */
+	public $macroNodeOpened = NULL; // NULL = not yet, TRUE = opened, FALSE = already closed
 
 
 	/**
@@ -43,20 +40,18 @@ class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 		$me->addMacro('webHead', $open, $close);
 
 		$cb = function (Latte\MacroNode $node) use ($me, $class){
-			if($me->macroNodeOpened){
-				return $me->renderMacroElement($node);
-			}
-			$me->nodes[] = $node; // if not opened, add to queue
+			$me->nodes[] = $node;
 		};
 		$me->addMacro('css', $cb);
 		$me->addMacro('js', $cb);
 		$me->addMacro('rss', $cb);
 		$me->addMacro('meta', $cb);
+		$me->addMacro('og', $cb);
 
-		$me->addMacro('webHead:begin', $class.'::getWebHeadComponent($presenter)->renderBegin();');
-		$me->addMacro('webHead:metaTags', $class.'::getWebHeadComponent($presenter)->renderMetaTags();');
-		$me->addMacro('webHead:elements', $class.'::getWebHeadComponent($presenter)->renderElements();');
-		$me->addMacro('webHead:end', $class.'::getWebHeadComponent($presenter)->renderEnd();');
+		$me->addMacro('webHead:begin', $class.'::getWebHeadComponent($presenter)->render("begin");');
+		$me->addMacro('webHead:metaTags', $class.'::getWebHeadComponent($presenter)->render("metaTags");');
+		$me->addMacro('webHead:elements', $class.'::getWebHeadComponent($presenter)->render("elements");');
+		$me->addMacro('webHead:end', $class.'::getWebHeadComponent($presenter)->render("end");');
 
 		$me->addMacro('webHead:setTitle', $class.'::getWebHeadComponent($presenter)->setTitle(%node.args);');
 		$me->addMacro('webHead:addTitle', $class.'::getWebHeadComponent($presenter)->addTitle(%node.args);');
@@ -89,7 +84,9 @@ class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 			switch($name){
 				case 'meta':
 					$code[] = get_called_class().'::getWebHeadComponent($presenter)->setMetaTag("'.$args[0].'", "'.$args[1].'");';
-					continue;
+				break;
+				case 'og':
+					$code[] = get_called_class().'::getWebHeadComponent($presenter)->addOgTag("'.$args[0].'", "'.$args[1].'");';
 				break;
 				default:
 					$file = $args[0]; array_shift($args);
@@ -100,8 +97,8 @@ class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 		return array(implode("\n", $code), '');
 	}
 
-	
-	
+
+
 	/********************** Called from Generated code ***********************/
 
 	/**
@@ -111,29 +108,13 @@ class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 	public static function headArgs(Nette\Application\UI\Presenter $presenter, array $args)
 	{
 		$webHead = static::getWebHeadComponent($presenter);
-		if(isset($args['docType'])){
-			$webHead->setDocType($args['docType']);
-		}
-		if(isset($args['contentType'])){
-			$webHead->setContentType($args['docType']);
-		}
-		if(isset($args['lang'])){
-			$webHead->setLanguage($args['lang']);
-		}
-		if(isset($args['title'])){
-			$webHead->setTitle($args['title']);
-		}
-		if(isset($args['titles'])){
-			$webHead->addTitle($args['titles']);
-		}
-		if(isset($args['titleSep'])){
-			$webHead->setTitleSeparator($args['titleSep']);
-		}
-		if(isset($args['titlesReverseOrder'])){
-			$webHead->setTitlesReverseOrder($args['titlesReverseOrder']);
-		}
-		if(isset($args['favicon'])){
-			$webHead->setFavicon($args['favicon']);
+		$properties = array('docType', 'contentType', 'language', 'title', 'titles', 'titleSeparator', 'titlesReverseOrder');
+		foreach($args as $k => $v){
+			if(!in_array($k, $properties)){
+				throw new Nette\InvalidStateException("Unknown arg '$k'.");
+			}
+			$m = 'set' . ucfirst($k);
+			$webHead->$m($v);
 		}
 	}
 	
@@ -144,8 +125,8 @@ class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 	public static function renderHeadBegin(Nette\Application\UI\Presenter $presenter)
 	{
 		$webHead = static::getWebHeadComponent($presenter);
-		$webHead->renderBegin();
-		$webHead->renderMetaTags();
+		$webHead->render('begin');
+		$webHead->render('metaTags');
 	}
 
 
@@ -155,8 +136,8 @@ class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 	public static function renderHeadEnd(Nette\Application\UI\Presenter $presenter)
 	{
 		$webHead = static::getWebHeadComponent($presenter);
-		$webHead->renderElements();
-		$webHead->renderEnd();
+		$webHead->render('elements');
+		$webHead->render('end');
 	}
 
 
@@ -169,34 +150,6 @@ class Macro extends Latte\Macros\MacroSet implements Latte\IMacro
 			throw new Nette\InvalidStateException('You have to register ' . __NAMESPACE__ . ' as presenter component named ' . Control::PRESENTER_COMPONENT_NAME . '.');
 		}
 		return $component->getComponent(Control::PRESENTER_COMPONENT_NAME);
-	}
-
-
-	/**
-	 * @param \Nette\Latte\MacroNode $node
-	 * @return string
-	 * @internal
-	 */
-	public function renderMacroElement(Latte\MacroNode $node)
-	{
-		$args = $this->unFormatMacroArgs($node->args);
-		switch($node->name){
-			case 'meta':
-				$args = array(
-					'name' => $args[0],
-					'content' => $args[1],
-				);
-			break;
-			case 'css':
-			case 'js':
-			case 'rss':
-				$args['file'] = reset($args); array_shift($args);
-			break;
-			default:
-				throw new Nette\InvalidStateException("Unknown type '{$node->name}'.");
-		}
-		$args = $this->argsToArray($args);
-		return get_called_class().'::getWebHeadComponent($presenter)->renderElement("'.$node->name.'", array('.$args.')); echo "\n";' . "\n";
 	}
 
 

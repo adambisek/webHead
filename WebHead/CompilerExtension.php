@@ -40,7 +40,6 @@ class CompilerExtension extends Nette\Config\CompilerExtension
 	{
 		$config = $this->getConfig($this->getDefaultConfig());
 		$builder = $this->getContainerBuilder();
-
 		$builder->parameters[self::EXTENSION_NAME] = $config; // set params as public params
 	}
 
